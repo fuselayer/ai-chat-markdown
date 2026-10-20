@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude/Grok/Arena | Conversation/Chat Markdown Export/Download
 // @namespace    https://greasyfork.org/en/users/1462137-piknockyou
-// @version      10.11
+// @version      10.12
 // @author       Piknockyou (vibe-coded)
 // @license      AGPL-3.0
 // @description  Export AI chat conversations to Markdown. Supports Claude.ai, Grok.com, and Arena.ai
@@ -25,13 +25,17 @@
 // @connect      canaryarena.ai
 // @connect      r2.cloudflarestorage.com
 // @run-at       document-idle
-// @downloadURL https://update.greasyfork.org/scripts/559376/ClaudeGrokArena%20%7C%20ConversationChat%20Markdown%20ExportDownload.user.js
-// @updateURL https://update.greasyfork.org/scripts/559376/ClaudeGrokArena%20%7C%20ConversationChat%20Markdown%20ExportDownload.meta.js
 // ==/UserScript==
 
 // ═══════════════════════════════════════════════════════════════════════
 // CHANGELOG
 // ═══════════════════════════════════════════════════════════════════════
+//
+// v10.12 (fork)
+// - Added: Arena battle pair copy — hover a battle/side-by-side turn to outline
+//   both responses and copy just that pair as Markdown (clipboard only)
+// - Added: BATTLE_PAIR_COPY setting (Arena)
+// - Removed: @updateURL/@downloadURL so Greasy Fork updates don't replace this fork
 //
 // v10.10
 // - Fixed: Relative image path references file directly (no images/ subfolder)
@@ -313,6 +317,9 @@
         CLAUDE_EXPORT_ALL_REGENERATIONS: false,
         GROK_EXPORT_ALL_REGENERATIONS: false,
 
+        // ─── Interface ───────────────────────────────────────────────────────
+        BATTLE_PAIR_COPY: true,               // Arena: hover a battle turn to copy both responses
+
         // ─── File Naming ─────────────────────────────────────────────────────
         FILENAME_MAX_LEN: 80,
 
@@ -417,7 +424,8 @@
             'INCLUDE_MODEL_INFO',
             'INCLUDE_TIMESTAMPS',
             'INCLUDE_MESSAGE_IDS',
-            'INCLUDE_HEADER'
+            'INCLUDE_HEADER',
+            'BATTLE_PAIR_COPY'
         ]
     };
 
@@ -531,6 +539,13 @@
         INCLUDE_HEADER: { label: 'Include Header', group: 'Header' },
         INCLUDE_ACTIVE_LEAF_INFO: { label: 'Show Active Leaf/Response ID', group: 'Header', indent: true },
 
+        // Group: Interface
+        BATTLE_PAIR_COPY: {
+            label: 'Battle Pair Copy',
+            group: 'Interface',
+            tooltip: 'Arena battle / side-by-side only.\nHover a turn to outline both responses; the copy button on the right edge copies just that pair as Markdown.\nUses the same formatter as the full export.'
+        },
+
         // Group: Branching
         CLAUDE_EXPORT_ALL_REGENERATIONS: {
             label: 'Export All Regenerations',
@@ -547,7 +562,7 @@
     // Group display order
     const FLAG_GROUP_ORDER = [
         'Messages', 'Code', 'Images', 'Tools', 'Thinking', 'Attachments', 'Artifacts',
-        'Web Search', 'Metadata', 'Header', 'Branching'
+        'Web Search', 'Metadata', 'Header', 'Interface', 'Branching'
     ];
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -2221,7 +2236,7 @@
             });
         },
 
-        async fetchChat(chatId) {
+        async fetchChat(chatId, opts = {}) {
             const response = await fetch(`/api/evaluation/${chatId}`, {
                 credentials: 'include',
                 headers: { 'Accept': 'application/json' }
@@ -2238,9 +2253,11 @@
             }
 
             // Download image attachments (signed URLs expire ~1h)
+            // opts.includeImages=false skips the downloads (cheap metadata-only fetch)
             try {
                 const s = Settings.load(this.name);
-                if (s.INCLUDE_IMAGES) {
+                const includeImages = opts.includeImages !== undefined ? opts.includeImages : s.INCLUDE_IMAGES;
+                if (includeImages) {
                     for (const msg of data.messages) {
                         const attachments = Array.isArray(msg.experimental_attachments) ? msg.experimental_attachments : [];
                         for (const att of attachments) {
@@ -2459,100 +2476,10 @@
                     md += `\`ID: ${msg.id}\`\n\n`;
                 }
 
-                // Reasoning/thinking block (Arena uses "reasoning" field)
-                if (cfg.INCLUDE_THINKING && msg.reasoning) {
-                    md += Utils.formatThinkingBlock(msg.reasoning, cfg);
-                }
-
-                // Image attachments (experimental_attachments with image content types)
-                if (cfg.INCLUDE_IMAGES && msg.experimental_attachments?.length > 0) {
-                    const imageAtts = msg.experimental_attachments.filter(
-                        att => att?.contentType?.startsWith('image/')
-                    );
-                    const mode = cfg.IMAGE_EXPORT_MODE || 'file_only';
-
-                    imageAtts.forEach((att, idx) => {
-                        const rawName = att.name ? att.name.split('/').pop() : `image_${idx + 1}`;
-                        // Sanitize filename for filesystem safety
-                        const fileName = rawName.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
-
-                        if (att.__base64DataUri) {
-                            if (mode === 'base64' || mode === 'base64_and_file') {
-                                md += `![${fileName}](${att.__base64DataUri})\n\n`;
-                            } else {
-                                // file_only: reference via relative path (same directory)
-                                md += `![${fileName}](${fileName})\n\n`;
-                            }
-                            imagesEmbedded++;
-                        } else {
-                            const reason = att.__fetchError || 'not downloaded';
-                            md += `> 🖼️ **Image:** ${Utils.escapeHtml(fileName)} *(${att.contentType} — ${reason})*\n\n`;
-                        }
-                    });
-                }
-
-                // Main content with optional inline citations
-                let content = msg.content || '';
-
-                // Collect sources for this message
-                let sources = [];
-                if (msg.sources?.length > 0) {
-                    sources = msg.sources.filter(s => s && s.url);
-
-                    // Insert inline numeric superscript citations (if enabled)
-                    if (cfg.INCLUDE_SOURCES && sources.length > 0) {
-                        // Build insertions with source index (1-based)
-                        const insertions = [];
-                        sources.forEach((source, sourceIdx) => {
-                            if (source.charLocation?.length > 0) {
-                                source.charLocation.forEach(pos => {
-                                    insertions.push({
-                                        pos: pos,
-                                        num: sourceIdx + 1,
-                                        url: source.url
-                                    });
-                                });
-                            }
-                        });
-
-                        // Sort: descending by position, then descending by num for same position
-                        // This ensures [1][2][3] order when multiple sources cite same position
-                        insertions.sort((a, b) => {
-                            if (a.pos !== b.pos) return b.pos - a.pos;
-                            return b.num - a.num;
-                        });
-
-                        // Insert numeric superscript links
-                        insertions.forEach(ins => {
-                            const insertPos = Math.min(ins.pos, content.length);
-                            content = content.slice(0, insertPos) +
-                                `<sup>[[${ins.num}](${ins.url})]</sup>` +
-                                content.slice(insertPos);
-                        });
-                    }
-                }
-
-                content = Utils.processCodeBlocks(content, cfg);
-                md += `${content}\n\n`;
-
-                // Add sources list section after content (if enabled)
-                if (cfg.INCLUDE_SOURCES_LIST && sources.length > 0) {
-                    if (cfg.COLLAPSIBLE_SOURCES_LIST) {
-                        md += `<details>\n<summary><strong>📚 Sources (${sources.length})</strong></summary>\n\n`;
-                        sources.forEach((source, idx) => {
-                            const title = (source.title || source.url).replace(/\n/g, ' ').trim();
-                            md += `${idx + 1}. [${title}](${source.url})\n`;
-                        });
-                        md += `\n</details>\n\n`;
-                    } else {
-                        md += `**📚 Sources (${sources.length}):**\n\n`;
-                        sources.forEach((source, idx) => {
-                            const title = (source.title || source.url).replace(/\n/g, ' ').trim();
-                            md += `${idx + 1}. [${title}](${source.url})\n`;
-                        });
-                        md += `\n`;
-                    }
-                }
+                // Body: thinking, images, content, sources (shared with battle pair copy)
+                const body = this.renderMessageBody(msg, cfg);
+                md += body.md;
+                imagesEmbedded += body.imagesEmbedded;
 
                 if (cfg.COLLAPSIBLE_MESSAGES) {
                     md += `</details>\n\n---\n\n`;
@@ -2573,6 +2500,836 @@
                     imageFiles: []  // populated by caller for separate file downloads
                 }
             };
+        },
+
+        /**
+         * Render one message body (thinking, images, content, sources) as Markdown.
+         * Shared by the full export and the battle pair copy, so both stay identical.
+         * @param {object} msg - API message
+         * @param {object} cfg - Merged settings
+         * @returns {{md: string, imagesEmbedded: number}}
+         */
+        renderMessageBody(msg, cfg) {
+            let md = '';
+            let imagesEmbedded = 0;
+
+            // Reasoning/thinking block (Arena uses "reasoning" field)
+            if (cfg.INCLUDE_THINKING && msg.reasoning) {
+                md += Utils.formatThinkingBlock(msg.reasoning, cfg);
+            }
+
+            // Image attachments (experimental_attachments with image content types)
+            if (cfg.INCLUDE_IMAGES && msg.experimental_attachments?.length > 0) {
+                const imageAtts = msg.experimental_attachments.filter(
+                    att => att?.contentType?.startsWith('image/')
+                );
+                const mode = cfg.IMAGE_EXPORT_MODE || 'file_only';
+
+                imageAtts.forEach((att, idx) => {
+                    const rawName = att.name ? att.name.split('/').pop() : `image_${idx + 1}`;
+                    // Sanitize filename for filesystem safety
+                    const fileName = rawName.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+
+                    if (att.__base64DataUri) {
+                        if (mode === 'base64' || mode === 'base64_and_file') {
+                            md += `![${fileName}](${att.__base64DataUri})\n\n`;
+                        } else {
+                            // file_only: reference via relative path (same directory)
+                            md += `![${fileName}](${fileName})\n\n`;
+                        }
+                        imagesEmbedded++;
+                    } else {
+                        const reason = att.__fetchError || 'not downloaded';
+                        md += `> 🖼️ **Image:** ${Utils.escapeHtml(fileName)} *(${att.contentType} — ${reason})*\n\n`;
+                    }
+                });
+            }
+
+            // Main content with optional inline citations
+            let content = msg.content || '';
+
+            // Collect sources for this message
+            let sources = [];
+            if (msg.sources?.length > 0) {
+                sources = msg.sources.filter(s => s && s.url);
+
+                // Insert inline numeric superscript citations (if enabled)
+                if (cfg.INCLUDE_SOURCES && sources.length > 0) {
+                    // Build insertions with source index (1-based)
+                    const insertions = [];
+                    sources.forEach((source, sourceIdx) => {
+                        if (source.charLocation?.length > 0) {
+                            source.charLocation.forEach(pos => {
+                                insertions.push({
+                                    pos: pos,
+                                    num: sourceIdx + 1,
+                                    url: source.url
+                                });
+                            });
+                        }
+                    });
+
+                    // Sort: descending by position, then descending by num for same position
+                    // This ensures [1][2][3] order when multiple sources cite same position
+                    insertions.sort((a, b) => {
+                        if (a.pos !== b.pos) return b.pos - a.pos;
+                        return b.num - a.num;
+                    });
+
+                    // Insert numeric superscript links
+                    insertions.forEach(ins => {
+                        const insertPos = Math.min(ins.pos, content.length);
+                        content = content.slice(0, insertPos) +
+                            `<sup>[[${ins.num}](${ins.url})]</sup>` +
+                            content.slice(insertPos);
+                    });
+                }
+            }
+
+            content = Utils.processCodeBlocks(content, cfg);
+            md += `${content}\n\n`;
+
+            // Add sources list section after content (if enabled)
+            if (cfg.INCLUDE_SOURCES_LIST && sources.length > 0) {
+                if (cfg.COLLAPSIBLE_SOURCES_LIST) {
+                    md += `<details>\n<summary><strong>📚 Sources (${sources.length})</strong></summary>\n\n`;
+                    sources.forEach((source, idx) => {
+                        const title = (source.title || source.url).replace(/\n/g, ' ').trim();
+                        md += `${idx + 1}. [${title}](${source.url})\n`;
+                    });
+                    md += `\n</details>\n\n`;
+                } else {
+                    md += `**📚 Sources (${sources.length}):**\n\n`;
+                    sources.forEach((source, idx) => {
+                        const title = (source.title || source.url).replace(/\n/g, ' ').trim();
+                        md += `${idx + 1}. [${title}](${source.url})\n`;
+                    });
+                    md += `\n`;
+                }
+            }
+
+
+            return { md, imagesEmbedded };
+        },
+
+        /**
+         * Group assistant messages into battle turns (two responses sharing a parent).
+         * Turn numbers match the numbering used by generateMarkdown().
+         * @param {object} data - Raw API response
+         * @returns {Array<{turn: number, messages: Array<object>}>}
+         */
+        groupApiPairs(data) {
+            const order = [];
+            const groups = new Map();
+
+            (data?.messages || []).forEach(msg => {
+                const key = msg.parentMessageIds?.[0] || 'root';
+                if (!groups.has(key)) {
+                    groups.set(key, []);
+                    order.push(key);
+                }
+                groups.get(key).push(msg);
+            });
+
+            const pairs = [];
+            order.forEach((key, i) => {
+                const assistants = groups.get(key)
+                    .filter(m => m.role === 'assistant')
+                    .sort((a, b) => (a.participantPosition || '').localeCompare(b.participantPosition || ''));
+                if (assistants.length < 2) return;
+                pairs.push({ turn: i + 1, messages: assistants.slice(0, 2) });
+            });
+            return pairs;
+        },
+
+        /**
+         * Render one battle turn (both responses) as a Markdown snippet.
+         * @param {{turn: number, messages: Array<object>}} apiPair
+         * @param {{cards: Array<{label: string}>}} domPair - Cards in left→right order
+         * @param {object} cfg - Merged settings
+         * @returns {string}
+         */
+        buildPairMarkdown(apiPair, domPair, cfg) {
+            const s = cfg || CONFIG;
+            const blocks = [];
+
+            apiPair.messages.forEach((msg, i) => {
+                const label = domPair?.cards?.[i]?.label || '';
+                const pos = (msg.participantPosition || (i === 0 ? 'a' : 'b')).toUpperCase();
+
+                let header = 'ASSISTANT';
+                if (s.INCLUDE_TURN_NUMBERS) header = `[${apiPair.turn}${pos}] ${header}`;
+                if (s.INCLUDE_MODEL_INFO && label) header = `${header} (${label})`;
+
+                let block = `## ${header}\n\n`;
+                if (s.INCLUDE_TIMESTAMPS && msg.createdAt) {
+                    block += `*${new Date(msg.createdAt).toLocaleString()}*\n\n`;
+                }
+                block += this.renderMessageBody(msg, s).md;
+                blocks.push(block.trimEnd());
+            });
+
+            return blocks.join('\n\n---\n\n') + '\n';
+        }
+    };
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ARENA BATTLE PAIR COPY
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Hovering a battle / side-by-side turn outlines both response cards and
+    // offers a copy button on the right edge. Copies just that pair as Markdown,
+    // rendered by ArenaProvider so the snippet matches a full export.
+
+    const BATTLE_PAIR_ICONS = {
+        copy: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M6.5 15h-1A1.5 1.5 0 0 1 4 13.5v-8A1.5 1.5 0 0 1 5.5 4h8A1.5 1.5 0 0 1 15 5.5v1"/></svg>',
+        check: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+        error: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v5.5M12 16.6h.01"/></svg>'
+    };
+
+    const BattlePairCopy = {
+        overlay: null,
+        box: null,
+        btn: null,
+
+        list: null,
+        pairs: [],
+        cardMap: null,
+        active: null,
+        activeRect: null,
+
+        state: 'idle',
+        spinAnim: null,
+        stateTimer: null,
+        hideTimer: null,
+        lastPairCount: -1,
+
+        lastScan: 0,
+        themeKey: '',
+        colors: null,
+        placeRaf: 0,
+
+        dataCache: null,
+        pendingFetch: null,
+
+        init() {
+            if (this.overlay || !document.body) return;
+
+            this.buildOverlay();
+
+            document.addEventListener('pointermove', (e) => this.onPointerMove(e), { capture: true, passive: true });
+            window.addEventListener('scroll', () => this.requestPlace(), { capture: true, passive: true });
+            window.addEventListener('resize', () => {
+                this.lastScan = 0;
+                this.requestPlace();
+            }, { passive: true });
+
+            this.scan();
+        },
+
+        // ─── Overlay ──────────────────────────────────────────────────────────
+
+        buildOverlay() {
+            const host = document.createElement('div');
+            host.id = 'chat-export-pair-overlay';
+            Object.assign(host.style, {
+                position: 'fixed',
+                inset: '0',
+                zIndex: String(CONFIG.Z_INDEX - 1),
+                pointerEvents: 'none',
+                display: 'none',
+                contain: 'layout style'
+            });
+
+            const box = document.createElement('div');
+            Object.assign(box.style, {
+                position: 'absolute',
+                top: '0',
+                left: '0',
+                boxSizing: 'border-box',
+                border: '1px solid var(--pair-line)',
+                borderRadius: '21px',
+                pointerEvents: 'none',
+                opacity: '0',
+                transition: 'opacity 0.14s ease, border-color 0.14s ease'
+            });
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.setAttribute('aria-label', 'Copy both responses as Markdown');
+            Object.assign(btn.style, {
+                position: 'absolute',
+                top: '0',
+                left: '0',
+                width: '28px',
+                height: '28px',
+                padding: '0',
+                margin: '0',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxSizing: 'border-box',
+                borderRadius: '9px',
+                border: '1px solid var(--pair-line)',
+                background: 'var(--pair-btn-bg)',
+                color: 'var(--pair-icon)',
+                cursor: 'pointer',
+                opacity: '0',
+                pointerEvents: 'auto',
+                backdropFilter: 'blur(10px)',
+                WebkitBackdropFilter: 'blur(10px)',
+                boxShadow: '0 1px 2px rgba(0,0,0,0.16)',
+                transition: 'opacity 0.14s ease, background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease'
+            });
+
+            btn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                this.copyActive();
+            });
+            btn.addEventListener('pointerenter', () => {
+                this.cancelHide();
+                if (this.state === 'idle') btn.style.background = 'var(--pair-btn-bg-hover)';
+                this.box.style.borderColor = 'var(--pair-line-hover)';
+            });
+            btn.addEventListener('pointerleave', () => {
+                btn.style.background = 'var(--pair-btn-bg)';
+                this.box.style.borderColor = 'var(--pair-line)';
+                this.scheduleHide();
+            });
+
+            host.appendChild(box);
+            host.appendChild(btn);
+            document.body.appendChild(host);
+
+            this.overlay = host;
+            this.box = box;
+            this.btn = btn;
+            this.setState('idle');
+        },
+
+        setTheme(light) {
+            const key = light ? 'light' : 'dark';
+            if (this.themeKey === key) return;
+
+            this.themeKey = key;
+            const c = light ? {
+                line: 'rgba(0,0,0,0.16)',
+                lineHover: 'rgba(0,0,0,0.30)',
+                btnBg: 'rgba(255,255,255,0.82)',
+                btnBgHover: 'rgba(0,0,0,0.05)',
+                icon: 'rgba(0,0,0,0.66)'
+            } : {
+                line: 'rgba(255,255,255,0.24)',
+                lineHover: 'rgba(255,255,255,0.42)',
+                btnBg: 'rgba(24,24,24,0.72)',
+                btnBgHover: 'rgba(255,255,255,0.10)',
+                icon: 'rgba(255,255,255,0.78)'
+            };
+
+            this.colors = c;
+            const style = this.overlay.style;
+            style.setProperty('--pair-line', c.line);
+            style.setProperty('--pair-line-hover', c.lineHover);
+            style.setProperty('--pair-btn-bg', c.btnBg);
+            style.setProperty('--pair-btn-bg-hover', c.btnBgHover);
+            style.setProperty('--pair-icon', c.icon);
+            if (this.state === 'idle') this.btn.style.color = c.icon;
+        },
+
+        isLightColor(value) {
+            const m = /rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+))?/.exec(value || '');
+            if (!m) return null;
+            const alpha = m[4] === undefined ? 1 : parseFloat(m[4]);
+            if (alpha < 0.4) return null;
+            const lum = (0.2126 * +m[1] + 0.7152 * +m[2] + 0.0722 * +m[3]) / 255;
+            return lum > 0.55;
+        },
+
+        // ─── Detection ────────────────────────────────────────────────────────
+
+        findList() {
+            const selectors = ['ol.mt-8', 'ol[class*="mt-8"]'];
+            for (const selector of selectors) {
+                for (const el of document.querySelectorAll(selector)) {
+                    if (el.querySelector('div.sticky span.truncate')) return el;
+                }
+            }
+
+            // Fallback: highest container that still holds every sticky model header
+            const spans = [...document.querySelectorAll('div.sticky span.truncate')];
+            if (spans.length < 2) return null;
+            let node = spans[0];
+            while (node.parentElement && node.parentElement !== document.body &&
+                   spans.every(s => node.parentElement.contains(s))) {
+                node = node.parentElement;
+            }
+            return node === document.body ? null : node;
+        },
+
+        findCards(list) {
+            const listRect = list.getBoundingClientRect();
+            if (!listRect.width) return [];
+
+            const headers = [...list.querySelectorAll('div.sticky span.truncate')];
+            const cards = [];
+            const seen = new Set();
+
+            for (const span of headers) {
+                let node = span.closest('div.sticky') || span.parentElement;
+                let card = null;
+
+                // Highest ancestor that is still one response column, not the row
+                while (node && node !== list) {
+                    const r = node.getBoundingClientRect();
+                    const singleHeader = node.querySelectorAll('div.sticky').length <= 1;
+                    if (singleHeader && r.width > 140 && r.width <= listRect.width * 0.62 && r.height > 80) {
+                        card = node;
+                    }
+                    node = node.parentElement;
+                }
+                if (!card || seen.has(card)) continue;
+
+                seen.add(card);
+                cards.push({
+                    el: card,
+                    label: (span.textContent || '').trim(),
+                    rect: card.getBoundingClientRect()
+                });
+            }
+            return cards;
+        },
+
+        pairCards(cards) {
+            const used = new Set();
+            const pairs = [];
+            const sorted = cards.slice().sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+
+            for (const a of sorted) {
+                if (used.has(a.el)) continue;
+
+                let match = null;
+                let bestDelta = Infinity;
+                for (const b of sorted) {
+                    if (b === a || used.has(b.el)) continue;
+
+                    const topDelta = Math.abs(b.rect.top - a.rect.top);
+                    if (topDelta > 28) continue;
+
+                    const gap = b.rect.left >= a.rect.left
+                        ? b.rect.left - a.rect.right
+                        : a.rect.left - b.rect.right;
+                    if (gap < -2 || gap > 80) continue;
+
+                    const widthRatio = Math.max(a.rect.width, b.rect.width) / Math.max(1, Math.min(a.rect.width, b.rect.width));
+                    if (widthRatio > 1.5) continue;
+
+                    if (topDelta < bestDelta) {
+                        bestDelta = topDelta;
+                        match = b;
+                    }
+                }
+                if (!match) continue;
+
+                used.add(a.el);
+                used.add(match.el);
+                pairs.push({ cards: a.rect.left <= match.rect.left ? [a, match] : [match, a] });
+            }
+
+            pairs.sort((x, y) => x.cards[0].rect.top - y.cards[0].rect.top);
+            return pairs;
+        },
+
+        scan() {
+            if (!this.overlay) return;
+            this.lastScan = Date.now();
+
+            const provider = Providers.getCurrent();
+            if (!provider || provider.name !== 'Arena' || !Settings.get('Arena', 'BATTLE_PAIR_COPY')) {
+                return this.reset();
+            }
+
+            const list = this.findList();
+            if (!list) return this.reset();
+
+            this.list = list;
+            this.pairs = this.pairCards(this.findCards(list));
+            this.cardMap = new WeakMap();
+            this.pairs.forEach(pair => pair.cards.forEach(card => this.cardMap.set(card.el, pair)));
+
+            // Keep the outline attached across rescans (pairs are rebuilt each time)
+            if (this.active) {
+                const prev = this.active;
+                const stillThere = this.pairs.find(pair =>
+                    pair.cards[0].el === prev.cards[0].el && pair.cards[1].el === prev.cards[1].el);
+                if (stillThere) {
+                    this.active = stillThere;
+                    this.requestPlace();
+                } else {
+                    this.hideNow();
+                }
+            }
+
+            if (CONFIG.DEBUG && this.pairs.length && this.pairs.length !== this.lastPairCount) {
+                console.log('[Chat Exporter] Battle pairs found:', this.pairs.length);
+            }
+            this.lastPairCount = this.pairs.length;
+        },
+
+        reset() {
+            this.hideNow();
+            this.list = null;
+            this.pairs = [];
+            this.cardMap = null;
+            this.active = null;
+        },
+
+        onNavigate() {
+            this.reset();
+            this.dataCache = null;
+            this.pendingFetch = null;
+            this.lastScan = 0;
+        },
+
+        // ─── Hover ────────────────────────────────────────────────────────────
+
+        onPointerMove(e) {
+            if (!this.overlay) return;
+
+            const target = e.target;
+            if (this.btn && (target === this.btn || this.btn.contains(target))) {
+                this.cancelHide();
+                return;
+            }
+
+            const now = Date.now();
+            if (!this.list || !this.list.isConnected) {
+                if (now - this.lastScan > 1200) this.scan();
+            } else if (now - this.lastScan > 1200) {
+                const r = this.list.getBoundingClientRect();
+                if (e.clientY >= r.top - 40 && e.clientY <= r.bottom + 40) this.scan();
+            }
+
+            const card = this.cardFromNode(target);
+            if (card) {
+                const pair = this.cardMap.get(card);
+                if (pair) return this.show(pair);
+                return this.scheduleHide();
+            }
+
+            // Keep the outline while the pointer is inside it (e.g. the gutter between cards)
+            if (this.active && this.activeRect && this.insideActiveRect(e.clientX, e.clientY, 16)) {
+                this.cancelHide();
+                return;
+            }
+            this.scheduleHide();
+        },
+
+        cardFromNode(node) {
+            let el = node;
+            let depth = 0;
+            while (el && el !== document.body && depth++ < 40) {
+                if (this.cardMap && this.cardMap.has(el)) return el;
+                el = el.parentElement;
+            }
+            return null;
+        },
+
+        insideActiveRect(x, y, margin) {
+            const r = this.activeRect;
+            return x >= r.left - margin && x <= r.right + margin &&
+                   y >= r.top - margin && y <= r.bottom + margin;
+        },
+
+        show(pair) {
+            this.cancelHide();
+            if (this.active === pair) {
+                this.requestPlace();
+                return;
+            }
+
+            this.active = pair;
+            this.setState('idle');
+            this.overlay.style.display = 'block';
+            this.requestPlace();
+            this.prefetch();
+
+            requestAnimationFrame(() => {
+                if (!this.active) return;
+                this.box.style.opacity = '1';
+                this.btn.style.opacity = '1';
+            });
+        },
+
+        requestPlace() {
+            if (this.placeRaf) return;
+            this.placeRaf = requestAnimationFrame(() => {
+                this.placeRaf = 0;
+                this.place();
+            });
+        },
+
+        place() {
+            if (!this.active || !this.overlay || this.overlay.style.display === 'none') return;
+
+            const [left, right] = this.active.cards;
+            if (!left.el.isConnected || !right.el.isConnected) return this.hideNow();
+
+            const a = left.el.getBoundingClientRect();
+            const b = right.el.getBoundingClientRect();
+            const pad = 7;
+
+            const x1 = Math.min(a.left, b.left) - pad;
+            const y1 = Math.min(a.top, b.top) - pad;
+            const x2 = Math.max(a.right, b.right) + pad;
+            const y2 = Math.max(a.bottom, b.bottom) + pad;
+
+            if (y2 < 24 || y1 > window.innerHeight - 24) return this.hideNow();
+
+            this.activeRect = { left: x1, top: y1, right: x2, bottom: y2 };
+
+            // Theme follows the card surface, falling back to body/OS preference
+            const cardStyle = getComputedStyle(left.el);
+            let light = this.isLightColor(cardStyle.backgroundColor);
+            if (light === null) light = this.isLightColor(getComputedStyle(document.body).backgroundColor);
+            if (light === null) light = !window.matchMedia('(prefers-color-scheme: dark)').matches;
+            this.setTheme(light);
+
+            const radius = parseFloat(cardStyle.borderTopLeftRadius) || 14;
+            this.box.style.transform = `translate3d(${Math.round(x1)}px, ${Math.round(y1)}px, 0)`;
+            this.box.style.width = `${Math.round(x2 - x1)}px`;
+            this.box.style.height = `${Math.round(y2 - y1)}px`;
+            this.box.style.borderRadius = `${Math.round(radius + pad)}px`;
+
+            const size = 28;
+            let bx = x2 + 8;
+            let by = y1 + 12;
+            if (bx + size > window.innerWidth - 4) {
+                // No room outside the box: tuck it inside the bottom-right corner,
+                // clear of the card's own header icons.
+                bx = x2 - size - 10;
+                by = y2 - size - 12;
+            }
+            if (by < 4) by = 4;
+            this.btn.style.transform = `translate3d(${Math.round(bx)}px, ${Math.round(by)}px, 0)`;
+        },
+
+        scheduleHide() {
+            if (this.hideTimer) return;
+            this.hideTimer = setTimeout(() => {
+                this.hideTimer = null;
+                this.hideNow();
+            }, 220);
+        },
+
+        cancelHide() {
+            if (!this.hideTimer) return;
+            clearTimeout(this.hideTimer);
+            this.hideTimer = null;
+        },
+
+        hideNow() {
+            this.cancelHide();
+            this.active = null;
+            this.activeRect = null;
+            if (!this.overlay) return;
+            this.overlay.style.display = 'none';
+            this.box.style.opacity = '0';
+            this.btn.style.opacity = '0';
+            this.btn.style.background = 'var(--pair-btn-bg)';
+        },
+
+        // ─── Copy ─────────────────────────────────────────────────────────────
+
+        setState(state) {
+            if (!this.btn) return;
+
+            this.state = state;
+            if (this.spinAnim) {
+                this.spinAnim.cancel();
+                this.spinAnim = null;
+            }
+            clearTimeout(this.stateTimer);
+
+            if (state === 'loading') {
+                this.btn.innerHTML = '';
+                const spinner = document.createElement('span');
+                Object.assign(spinner.style, {
+                    width: '12px',
+                    height: '12px',
+                    border: '1.5px solid currentColor',
+                    borderTopColor: 'transparent',
+                    borderRadius: '50%',
+                    display: 'block'
+                });
+                this.btn.appendChild(spinner);
+                this.spinAnim = spinner.animate(
+                    [{ transform: 'rotate(0deg)' }, { transform: 'rotate(360deg)' }],
+                    { duration: 700, iterations: Infinity }
+                );
+                this.btn.disabled = true;
+                this.btn.style.color = this.colors ? this.colors.icon : 'currentColor';
+                this.btn.title = 'Copying pair…';
+                return;
+            }
+
+            this.btn.disabled = false;
+
+            if (state === 'copied') {
+                this.btn.innerHTML = BATTLE_PAIR_ICONS.check;
+                this.btn.style.color = '#22c55e';
+                this.btn.title = 'Copied';
+                this.stateTimer = setTimeout(() => this.setState('idle'), 1400);
+                return;
+            }
+
+            if (state === 'error') {
+                this.btn.innerHTML = BATTLE_PAIR_ICONS.error;
+                this.btn.style.color = '#ef4444';
+                this.btn.title = 'Copy failed';
+                this.stateTimer = setTimeout(() => this.setState('idle'), 1800);
+                return;
+            }
+
+            this.btn.innerHTML = BATTLE_PAIR_ICONS.copy;
+            this.btn.style.color = this.colors ? this.colors.icon : 'currentColor';
+            this.btn.title = 'Copy both responses as Markdown';
+        },
+
+        async copyActive() {
+            const pair = this.active;
+            if (!pair || this.state === 'loading') return;
+
+            const chatId = Providers.getCurrent()?.extractChatId(location.href);
+            let markdown = null;
+
+            // Fast path: data arrived while hovering, so the clipboard write stays
+            // inside the click's user activation.
+            const cached = chatId && this.dataCache?.chatId === chatId ? this.dataCache.data : null;
+            if (cached) markdown = this.buildMarkdown(cached, pair);
+
+            if (!markdown) {
+                this.setState('loading');
+                if (chatId) {
+                    try {
+                        markdown = this.buildMarkdown(await this.getData(chatId, true), pair);
+                    } catch (err) {
+                        console.warn('[Chat Exporter] Pair fetch failed, using DOM text:', err?.message || err);
+                    }
+                }
+                if (!markdown) markdown = this.domMarkdown(pair);
+            }
+
+            try {
+                await this.writeClipboard(markdown);
+                this.setState('copied');
+                UI.toast('Copied both responses as Markdown');
+            } catch (err) {
+                this.setState('error');
+                UI.toast('Copy failed');
+                console.error('[Chat Exporter] Clipboard write failed:', err);
+            }
+        },
+
+        prefetch() {
+            const chatId = Providers.getCurrent()?.extractChatId(location.href);
+            if (!chatId || (this.dataCache && this.dataCache.chatId === chatId)) return;
+            this.getData(chatId).catch(() => {});
+        },
+
+        getData(chatId, refresh = false) {
+            if (!refresh && this.dataCache && this.dataCache.chatId === chatId) {
+                return Promise.resolve(this.dataCache.data);
+            }
+            if (!refresh && this.pendingFetch && this.pendingFetch.chatId === chatId) {
+                return this.pendingFetch.promise;
+            }
+
+            const promise = ArenaProvider.fetchChat(chatId, { includeImages: false })
+                .then(data => {
+                    this.dataCache = { chatId, data };
+                    this.pendingFetch = null;
+                    return data;
+                }, err => {
+                    this.pendingFetch = null;
+                    throw err;
+                });
+
+            this.pendingFetch = { chatId, promise };
+            return promise;
+        },
+
+        buildMarkdown(data, pair) {
+            const apiPairs = ArenaProvider.groupApiPairs(data);
+            if (!apiPairs.length) return null;
+
+            const domCards = pair.cards.map(card => ({ label: card.label, el: card.el }));
+            const index = this.pairs.indexOf(pair);
+
+            // Index is only a hint — verify against rendered text, then search
+            const direct = apiPairs[index];
+            const matched = (direct && this.matchesDom(direct, domCards))
+                ? direct
+                : apiPairs.find(apiPair => this.matchesDom(apiPair, domCards));
+
+            if (!matched) return null;
+            return ArenaProvider.buildPairMarkdown(matched, { cards: domCards }, Settings.load('Arena'));
+        },
+
+        /**
+         * Loose DOM↔API check: the start (or end) of the API prose should appear
+         * in the card's rendered text once both are stripped to lowercase
+         * alphanumerics. Code blocks are dropped first — the DOM renders them
+         * without fences, so they would never match verbatim.
+         */
+        matchesDom(apiPair, domCards) {
+            const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+            const proseOf = s => norm(String(s || '').replace(/```[\s\S]*?```/g, ' '));
+
+            return apiPair.messages.every((msg, i) => {
+                const text = norm(domCards[i]?.el?.innerText).replace(norm(domCards[i]?.label), '');
+                const prose = proseOf(msg.content) || norm(msg.content);
+                if (!text || !prose) return false;
+                return text.includes(prose.slice(0, 40)) || text.includes(prose.slice(-40));
+            });
+        },
+
+        domMarkdown(pair) {
+            const blocks = pair.cards.map(card => {
+                const label = card.label ? ` (${card.label})` : '';
+                const text = String(card.el.innerText || '')
+                    .replace(card.label, '')
+                    .replace(/\s+\n/g, '\n')
+                    .trim();
+                return `## ASSISTANT${label}\n\n${text}`;
+            });
+            return blocks.join('\n\n---\n\n') + '\n';
+        },
+
+        async writeClipboard(text) {
+            if (navigator.clipboard && window.isSecureContext) {
+                try {
+                    await navigator.clipboard.writeText(text);
+                    return;
+                } catch (err) {
+                    console.warn('[Chat Exporter] navigator.clipboard failed, trying execCommand:', err?.message);
+                }
+            }
+
+            const area = document.createElement('textarea');
+            area.value = text;
+            area.setAttribute('readonly', '');
+            Object.assign(area.style, { position: 'fixed', top: '-9999px', left: '0', opacity: '0' });
+            document.body.appendChild(area);
+            area.select();
+            area.setSelectionRange(0, text.length);
+
+            let ok = false;
+            try {
+                ok = document.execCommand('copy');
+            } finally {
+                area.remove();
+            }
+            if (!ok) throw new Error('execCommand copy rejected');
         }
     };
 
@@ -4406,10 +5163,12 @@
             UI.btn.style.display = chatId ? 'flex' : 'none';
         }
         UI.update();
+        BattlePairCopy.onNavigate();
     };
 
     const init = () => {
         UI.init();
+        BattlePairCopy.init();
         checkRouter();
 
         // Poll for URL changes (handles SPA navigation)
