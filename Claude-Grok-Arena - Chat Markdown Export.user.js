@@ -1,10 +1,13 @@
 // ==UserScript==
 // @name         Claude/Grok/Arena | Conversation/Chat Markdown Export/Download
-// @namespace    https://greasyfork.org/en/users/1462137-piknockyou
-// @version      10.12
-// @author       Piknockyou (vibe-coded)
+// @namespace    https://github.com/fuselayer/ai-chat-markdown
+// @version      10.13
+// @author       fuselayer
 // @license      AGPL-3.0
 // @description  Export AI chat conversations to Markdown. Supports Claude.ai, Grok.com, and Arena.ai
+// @homepageURL  https://github.com/fuselayer/ai-chat-markdown
+// @updateURL    https://raw.githubusercontent.com/fuselayer/ai-chat-markdown/main/Claude-Grok-Arena%20-%20Chat%20Markdown%20Export.user.js
+// @downloadURL  https://raw.githubusercontent.com/fuselayer/ai-chat-markdown/main/Claude-Grok-Arena%20-%20Chat%20Markdown%20Export.user.js
 // @match        *://claude.ai/*
 // @match        *://grok.com/*
 // @match        *://grok.x.com/*
@@ -30,6 +33,13 @@
 // ═══════════════════════════════════════════════════════════════════════
 // CHANGELOG
 // ═══════════════════════════════════════════════════════════════════════
+//
+// Original script by Piknockyou (vibe-coded) — AGPL-3.0
+// https://greasyfork.org/en/scripts/559376-chatgpt-claude-grok-arena-conversation-chat-markdown-export-download
+//
+// v10.13 (fork)
+// - Changed: @author/@namespace are now this fork; @updateURL/@downloadURL point at
+//   this repo's raw file, so Tampermonkey updates from GitHub instead of Greasy Fork
 //
 // v10.12 (fork)
 // - Added: Arena battle pair copy — hover a battle/side-by-side turn to outline

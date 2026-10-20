@@ -6,10 +6,14 @@ Fork of [ChatGPT/Claude/Grok/Arena | Conversation/Chat Markdown Export/Download]
 
 ## Install
 
-Open the `.user.js` file in Tampermonkey → Install.
+```
+https://raw.githubusercontent.com/fuselayer/ai-chat-markdown/main/Claude-Grok-Arena%20-%20Chat%20Markdown%20Export.user.js
+```
+
+Open that URL — Tampermonkey offers Install. Updates are pulled from the same raw file whenever `@version` here increases.
 
 ## Fork changes
 
 - **Battle Pair Copy** (Arena.ai) — hover a battle / side-by-side turn: a thin outline wraps both responses and a copy button attaches to its right edge. Click copies both responses, formatted with the exporter's own Markdown renderer (thinking, code, citations, model names), straight to the clipboard. Toggle in settings, per provider.
 
-`@updateURL` / `@downloadURL` are removed so Greasy Fork updates don't overwrite this fork.
+`@updateURL` / `@downloadURL` point at this repo, not Greasy Fork, so the upstream script can't overwrite the fork.
